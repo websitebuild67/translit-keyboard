@@ -109,14 +109,76 @@ class MainActivity : Activity() {
         content.addView(preview)
 
         // --- Тема
-        content.addView(section("Тема"))
-        val darkSwitch = switchRow("Тёмная тема", KbSettings.get(this).dark) { checked ->
-            KbSettings.update(this) { it.copy(dark = checked) }
-            recreate()
+        content.addView(section("Тема оформления"))
+        val themeScroll = android.widget.HorizontalScrollView(this)
+        val themeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        themeScroll.addView(themeRow)
+        content.addView(themeScroll)
+        fun renderThemes() {
+            themeRow.removeAllViews()
+            val cur = KbSettings.get(this)
+            for (t in KbSettings.THEMES) {
+                val card = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    val sel = t.id == cur.themeId
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(14f)
+                        setColor(t.palette.bg)
+                        setStroke(dp(if (sel) 2.5f else 1f).toInt(),
+                            if (sel) t.palette.accent else 0x33FFFFFF)
+                    }
+                    val m = dp(5f).toInt()
+                    layoutParams = LinearLayout.LayoutParams(dp(96f).toInt(), dp(110f).toInt())
+                        .apply { setMargins(m, m, m, m) }
+                    setPadding(dp(8f).toInt(), dp(10f).toInt(), dp(8f).toInt(), dp(8f).toInt())
+                    setOnClickListener {
+                        KbSettings.update(this@MainActivity) { it.copy(themeId = t.id) }
+                        recreate()
+                    }
+                }
+                // мини-превью: три ряда клавиш
+                for (rowIdx in 0 until 3) {
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        val lp = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, dp(14f).toInt()
+                        )
+                        lp.bottomMargin = dp(3f).toInt()
+                        layoutParams = lp
+                    }
+                    for (i in 0 until 4) {
+                        val key = View(this).apply {
+                            background = GradientDrawable().apply {
+                                cornerRadius = dp(4f)
+                                setColor(
+                                    when {
+                                        rowIdx == 2 && i == 3 -> t.palette.accent
+                                        rowIdx == 0 -> t.palette.keyTop
+                                        else -> t.palette.funcTop
+                                    }
+                                )
+                            }
+                            layoutParams = LinearLayout.LayoutParams(
+                                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f
+                            ).apply { marginEnd = dp(2f).toInt() }
+                        }
+                        row.addView(key)
+                    }
+                    card.addView(row)
+                }
+                card.addView(TextView(this).apply {
+                    text = t.name
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    setTextColor(t.palette.text)
+                    gravity = Gravity.CENTER
+                })
+                themeRow.addView(card)
+            }
         }
-        content.addView(darkSwitch)
+        renderThemes()
 
-        content.addView(note("Цвет акцента"))
+        content.addView(note("Цвет акцента (пустой кружок — цвет темы)"))
         accentRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             val lp = LinearLayout.LayoutParams(
@@ -130,11 +192,21 @@ class MainActivity : Activity() {
 
         // --- Размеры
         content.addView(section("Размеры"))
-        content.addView(slider("Высота клавиш", 0.8f, 1.3f, KbSettings.get(this).keyHeight) { v ->
+        content.addView(slider("Высота клавиш", 0.8f, 1.6f, KbSettings.get(this).keyHeight) { v ->
             KbSettings.update(this) { it.copy(keyHeight = v) }
         })
         content.addView(slider("Размер шрифта", 0.8f, 1.4f, KbSettings.get(this).fontSize) { v ->
             KbSettings.update(this) { it.copy(fontSize = v) }
+        })
+
+        // --- Подсказки и автоисправление
+        content.addView(section("Подсказки и автоисправление"))
+        content.addView(note("Работают в ЙЦУКЕН и QWERTY; в транслите подсказки отключены"))
+        content.addView(switchRow("Панель подсказок", KbSettings.get(this).suggestionsEnabled) { checked ->
+            KbSettings.update(this) { it.copy(suggestionsEnabled = checked) }
+        })
+        content.addView(switchRow("Автоисправление опечаток", KbSettings.get(this).autocorrect) { checked ->
+            KbSettings.update(this) { it.copy(autocorrect = checked) }
         })
 
         // --- Отклик
@@ -146,19 +218,41 @@ class MainActivity : Activity() {
             KbSettings.update(this) { it.copy(sound = checked) }
         })
 
-        scroll.setBackgroundColor(if (KbSettings.get(this).dark) 0xFF14141A.toInt() else 0xFFF2F3F7.toInt())
+        scroll.setBackgroundColor(KbSettings.palette(KbSettings.get(this)).bg)
         setContentView(scroll)
     }
 
     private fun renderAccents() {
         accentRow.removeAllViews()
-        val current = KbSettings.get(this).accent
+        val stNow = KbSettings.get(this)
+        val current = stNow.accentOverride
+        val themeAccent = KbSettings.theme(stNow.themeId).palette.accent
+
+        // кружок «цвет темы» — сбрасывает переопределение
+        val reset = View(this).apply {
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(themeAccent)
+                if (current == null) setStroke(dp(3f).toInt(), KbSettings.palette(stNow).text)
+                else setStroke(dp(1f).toInt(), 0x44FFFFFF)
+            }
+            background = bg
+            val m = dp(6f).toInt()
+            layoutParams = LinearLayout.LayoutParams(dp(40f).toInt(), dp(40f).toInt())
+                .apply { setMargins(m, m, m, m) }
+            setOnClickListener {
+                KbSettings.update(this@MainActivity) { it.copy(accentOverride = null) }
+                renderAccents()
+            }
+        }
+        accentRow.addView(reset)
+
         for (c in KbSettings.ACCENTS) {
             val v = View(this).apply {
                 val bg = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(c)
-                    if (c == current) setStroke(dp(3f).toInt(), Color.WHITE)
+                    if (c == current) setStroke(dp(3f).toInt(), KbSettings.palette(stNow).text)
                     else setStroke(dp(1f).toInt(), 0x44FFFFFF)
                 }
                 background = bg
@@ -166,7 +260,7 @@ class MainActivity : Activity() {
                 layoutParams = LinearLayout.LayoutParams(dp(40f).toInt(), dp(40f).toInt())
                     .apply { setMargins(m, m, m, m) }
                 setOnClickListener {
-                    KbSettings.update(this@MainActivity) { it.copy(accent = c) }
+                    KbSettings.update(this@MainActivity) { it.copy(accentOverride = c) }
                     renderAccents()
                 }
             }
@@ -177,7 +271,7 @@ class MainActivity : Activity() {
     private fun header(text: String) = TextView(this).apply {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
-        setTextColor(if (KbSettings.get(context).dark) Color.WHITE else Color.BLACK)
+        setTextColor(KbSettings.palette(KbSettings.get(context)).text)
         setTypeface(null, android.graphics.Typeface.BOLD)
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
@@ -189,7 +283,7 @@ class MainActivity : Activity() {
     private fun section(text: String) = TextView(this).apply {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-        setTextColor(KbSettings.get(context).accent)
+        setTextColor(KbSettings.palette(KbSettings.get(context)).accent)
         setTypeface(null, android.graphics.Typeface.BOLD)
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
@@ -202,7 +296,7 @@ class MainActivity : Activity() {
     private fun note(text: String) = TextView(this).apply {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        setTextColor(if (KbSettings.get(context).dark) 0xFF9A9AA4.toInt() else 0xFF55555F.toInt())
+        setTextColor(KbSettings.palette(KbSettings.get(context)).dimText)
     }
 
     private fun button(text: String, onClick: () -> Unit) = Button(this).apply {
@@ -229,7 +323,7 @@ class MainActivity : Activity() {
         val label = TextView(this).apply {
             this.text = text
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setTextColor(if (KbSettings.get(context).dark) Color.WHITE else Color.BLACK)
+            setTextColor(KbSettings.palette(KbSettings.get(context)).text)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         val sw = Switch(this).apply {
@@ -254,7 +348,7 @@ class MainActivity : Activity() {
         }
         val label = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setTextColor(if (KbSettings.get(context).dark) Color.WHITE else Color.BLACK)
+            setTextColor(KbSettings.palette(KbSettings.get(context)).text)
         }
         fun fmt(v: Float) = String.format("%.0f%%", v * 100)
         label.text = "$text — ${fmt(initial)}"

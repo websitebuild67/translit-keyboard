@@ -12,7 +12,6 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -20,40 +19,36 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.annotation.DrawableRes
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlin.concurrent.thread
 
 class TranslitKeyboardService : InputMethodService() {
 
-    enum class Layout { TRANSLIT, CYRILLIC, LATIN }
-    enum class Page { LETTERS, SYMBOLS1, SYMBOLS2, EMOJI }
+    enum class Layout { TRANSLIT, CYRILLIC, LATIN, CUSTOM }
 
     private lateinit var st: KbSettings.State
     private lateinit var pal: KbSettings.Palette
 
     private var layout = Layout.TRANSLIT
-    private var page = Page.LETTERS
+    private var page = KeyboardLayoutManager.Page.LETTERS
+    private var customLayoutIndex = 0
 
     private var shiftActive = false
     private var shiftLocked = false
 
-    // Сколько символов вставлено последним нажатием (щ -> "sch" = 3)
-    private var lastCommitLen = 0
-    // Текущее недособранное слово на исходном языке (для подсказок)
-    private var composing = StringBuilder()
-    // Сколько символов текущего слова уже стоит в поле (в транслите "щ" = 3 символа)
-    private var composingCommitLen = 0
-    // Последнее завершённое слово (для ассоциативных подсказок)
-    private var lastWord: String? = null
+    private lateinit var input: InputHandler
 
     private var root: LinearLayout? = null
+    private var overlay: FrameLayout? = null
     private val letterKeys = mutableListOf<TextView>()
     private var shiftKey: TextView? = null
-    private var globeKey: TextView? = null
     private var suggestionsBar: LinearLayout? = null
     private var translatePanel: LinearLayout? = null
     private var translatePreview: TextView? = null
@@ -61,72 +56,27 @@ class TranslitKeyboardService : InputMethodService() {
 
     private val handler = Handler(Looper.getMainLooper())
 
-    companion object {
-        // ЙЦУКЕН
-        val RU1 = "й ц у к е н г ш щ з х ъ".split(' ')
-        val RU2 = "ф ы в а п р о л д ж э".split(' ')
-        val RU3 = listOf("я", "ч", "с", "м", "и", "т", "ь", "б", "ю")
-        // QWERTY
-        val EN1 = "q w e r t y u i o p".split(' ')
-        val EN2 = "a s d f g h j k l".split(' ')
-        val EN3 = listOf("z", "x", "c", "v", "b", "n", "m")
-
-        val SYM1 = listOf(
-            "1 2 3 4 5 6 7 8 9 0".split(' '),
-            "- / : ; ( ) $ & @ \"".split(' '),
-            listOf(".", ",", "?", "!", "'", "+", "=", "*", "#", "%")
-        )
-        val SYM2 = listOf(
-            listOf("~", "`", "|", "•", "√", "π", "÷", "×", "{", "}"),
-            listOf("£", "¢", "€", "¥", "^", "°", "=", "\\", "«", "»"),
-            listOf("[", "]", "_", "™", "®", "©", "¶", "§", "<", ">")
-        )
-        val EMOJI = listOf(
-            listOf("😀", "😂", "🥰", "😎", "🤔", "😢", "😡", "🥳", "😴", "🤯"),
-            listOf("👍", "👎", "🙏", "👋", "💪", "🤝", "✌️", "👌", "❤️", "🔥"),
-            listOf("🎉", "✨", "💯", "✅", "⚡", "🌙", "☀️", "🌈", "🍕", "☕")
-        )
-        // Долгое нажатие: базовый символ -> всплывающие варианты
-        val LONG_PRESS = mapOf(
-            "е" to listOf("ё"), "h" to listOf("ë"),
-            "c" to listOf("ç"), "n" to listOf("ñ"),
-            "-" to listOf("—", "–", "•"), "." to listOf("…", "·"),
-            "?" to listOf("¿"), "!" to listOf("¡"),
-            "$" to listOf("₽", "₴", "₸", "₺"),
-            "\"" to listOf("„", "“", "”", "«", "»"),
-            "'" to listOf("‚", "‘", "’"),
-            "0" to listOf("°")
-        )
-    }
-
     override fun onCreate() {
         super.onCreate()
+        input = InputHandler(this)
         st = KbSettings.get(this)
         pal = KbSettings.palette(st)
-        layout = try {
-            Layout.valueOf(st.layoutName)
-        } catch (_: Exception) {
-            Layout.TRANSLIT
-        }
+        layout = layoutFromName(st.layoutName)
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         st = KbSettings.get(this)
         pal = KbSettings.palette(st)
-        layout = try {
-            Layout.valueOf(st.layoutName)
-        } catch (_: Exception) {
-            layout
-        }
-        lastCommitLen = 0
-        composing.setLength(0)
-        composingCommitLen = 0
-        lastWord = null
+        layout = layoutFromName(st.layoutName)
+        input.reset()
         translatePanel = null
         translatePreview = null
         rebuild()
     }
+
+    private fun layoutFromName(name: String): Layout =
+        try { Layout.valueOf(name) } catch (_: Exception) { Layout.TRANSLIT }
 
     override fun onCreateInputView(): View {
         val pad = dp(6f).toInt()
@@ -136,14 +86,19 @@ class TranslitKeyboardService : InputMethodService() {
             setPadding(pad / 2, pad, pad / 2, pad + navBarHeight())
         }
         root = r
-        ViewCompat.setOnApplyWindowInsetsListener(r) { v, insets ->
+        val frame = FrameLayout(this).apply {
+            setBackgroundColor(pal.bg)
+            addView(r)
+        }
+        overlay = frame
+        ViewCompat.setOnApplyWindowInsetsListener(frame) { v, insets ->
             val bottom = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
-            v.setPadding(pad / 2, pad, pad / 2, pad + bottom)
+            r.setPadding(pad / 2, pad, pad / 2, pad + bottom)
             insets
         }
-        ViewCompat.requestApplyInsets(r)
+        ViewCompat.requestApplyInsets(frame)
         rebuild()
-        return r
+        return frame
     }
 
     private fun navBarHeight(): Int {
@@ -161,15 +116,18 @@ class TranslitKeyboardService : InputMethodService() {
 
         if (translatePanel != null) {
             r.addView(buildTranslatePanel())
-        } else {
+        } else if (layout != Layout.TRANSLIT) {
             r.addView(buildSuggestions())
         }
 
         when (page) {
-            Page.LETTERS -> buildLetters(r)
-            Page.SYMBOLS1 -> buildGrid(r, SYM1)
-            Page.SYMBOLS2 -> buildGrid(r, SYM2)
-            Page.EMOJI -> buildGrid(r, EMOJI)
+            KeyboardLayoutManager.Page.LETTERS -> buildLetters(r)
+            KeyboardLayoutManager.Page.SYMBOLS1 ->
+                buildGrid(r, KeyboardLayoutManager.SYMBOLS1.rows)
+            KeyboardLayoutManager.Page.SYMBOLS2 ->
+                buildGrid(r, KeyboardLayoutManager.SYMBOLS2.rows)
+            KeyboardLayoutManager.Page.EMOJI ->
+                buildGrid(r, KeyboardLayoutManager.EMOJI.rows)
         }
         r.addView(buildBottomRow())
         r.requestLayout()
@@ -179,46 +137,34 @@ class TranslitKeyboardService : InputMethodService() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(pal.barBg)
+            val hPad = dp(6f).toInt()
+            setPadding(hPad, dp(4f).toInt(), hPad, dp(4f).toInt())
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(40f).toInt()
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44f).toInt()
             )
         }
         suggestionsBar = bar
 
-        // Кнопка перевода — только для ЙЦУКЕН и QWERTY
         if (layout != Layout.TRANSLIT) {
-            val tr = TextView(this).apply {
-                text = "🌐"
-                gravity = Gravity.CENTER
-                setTextColor(pal.text)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f * st.fontSize)
-                val bg = GradientDrawable().apply {
-                    cornerRadius = dp(8f)
-                    setColor(pal.func)
-                }
-                background = bg
-                layoutParams = LinearLayout.LayoutParams(dp(44f).toInt(), dp(34f).toInt())
-                    .apply { marginEnd = dp(4f).toInt() }
-                setOnClickListener { openTranslate() }
-            }
+            val tr = makeIconKey(R.drawable.ic_translate, 0f)
+            tr.layoutParams = LinearLayout.LayoutParams(dp(40f).toInt(), dp(34f).toInt())
+                .apply { marginEnd = dp(4f).toInt() }
+            tr.setOnClickListener { openTranslate() }
             bar.addView(tr)
         }
 
-        val kind = when (layout) {
-            Layout.TRANSLIT -> "translit"
-            Layout.CYRILLIC -> "ru"
-            Layout.LATIN -> "en"
-        }
+        val kind = suggestionKind()
         val translitFn: ((Char) -> String)? =
             if (layout == Layout.TRANSLIT) ({ c -> st.translitMode.translit(c, false) }) else null
 
-        val words = try {
-            Dictionary.suggestions(
-                this, kind, composing.toString(), lastWord, translitFn
+        val words = if (st.suggestionsEnabled) try {
+            SuggestionEngine.suggestions(
+                this, kind, input.composing.toString(), input.lastWords, translitFn
             )
         } catch (_: Exception) {
             emptyList()
-        }
+        } else emptyList()
 
         for ((src, ins) in words) {
             val tv = TextView(this).apply {
@@ -226,12 +172,12 @@ class TranslitKeyboardService : InputMethodService() {
                 gravity = Gravity.CENTER
                 setTextColor(pal.text)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * st.fontSize)
-                val bg = GradientDrawable().apply {
-                    cornerRadius = dp(8f)
-                    setColor(pal.key)
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(17f)
+                    setColor(pal.keyTop)
+                    setStroke(dp(1f).toInt(), pal.keyStroke)
                 }
-                background = bg
-                val hPad = dp(12f).toInt()
+                val hPad = dp(14f).toInt()
                 setPadding(hPad, 0, hPad, 0)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, dp(34f).toInt()
@@ -243,26 +189,29 @@ class TranslitKeyboardService : InputMethodService() {
         return bar
     }
 
-    /**
-     * src — фраза на исходном языке (например «как дела»), ins — строка для вставки
-     * (в транслите «kak dela»). Заменяет недособранное слово и добавляет фразу.
-     */
+    private fun suggestionKind(): String = when (layout) {
+        Layout.TRANSLIT -> "translit"
+        Layout.CYRILLIC -> "ru"
+        else -> "en"
+    }
+
     private fun commitSuggestion(src: String, ins: String) {
         val ic = currentInputConnection ?: return
-        // стираем уже набранную часть текущего слова
-        if (composingCommitLen > 0) {
-            ic.deleteSurroundingText(composingCommitLen, 0)
+        if (input.composingCommitLen > 0) {
+            ic.deleteSurroundingText(input.composingCommitLen, 0)
         }
         val upper = shiftActive || shiftLocked
         val out = if (upper && ins.isNotEmpty())
             ins[0].uppercaseChar() + ins.substring(1) else ins
         ic.commitText(out, 1)
 
-        // последнее слово фразы становится ассоциацией для следующих подсказок
-        lastWord = src.trim().split(' ').lastOrNull()?.lowercase()
-        composing.setLength(0)
-        composingCommitLen = 0
-        lastCommitLen = 0
+        val parts = src.trim().split(' ').map { it.lowercase() }
+        input.lastWords.addAll(parts)
+        while (input.lastWords.size > 2) input.lastWords.removeAt(0)
+
+        input.composing.setLength(0)
+        input.composingCommitLen = 0
+        input.lastCommitLen = 0
         if (shiftActive && !shiftLocked) shiftActive = false
         refreshLetters()
         refreshSuggestions()
@@ -271,6 +220,7 @@ class TranslitKeyboardService : InputMethodService() {
     private fun refreshSuggestions() {
         val r = root ?: return
         if (translatePanel != null) return
+        if (layout == Layout.TRANSLIT) return
         val bar = suggestionsBar ?: return
         val index = r.indexOfChild(bar)
         if (index >= 0) {
@@ -280,81 +230,69 @@ class TranslitKeyboardService : InputMethodService() {
     }
 
     private fun buildLetters(r: LinearLayout) {
-        when (layout) {
-            Layout.TRANSLIT, Layout.CYRILLIC -> {
-                r.addView(buildRow(RU1, letters = true))
-                r.addView(buildRow(RU2, letters = true))
-                r.addView(buildCyrRow3())
+        val def = when (layout) {
+            Layout.TRANSLIT, Layout.CYRILLIC -> KeyboardLayoutManager.RU_LETTERS
+            Layout.LATIN -> KeyboardLayoutManager.EN_LETTERS
+            Layout.CUSTOM -> {
+                val customs = KeyboardLayoutManager.customLayouts(this)
+                customs.getOrNull(customLayoutIndex) ?: KeyboardLayoutManager.RU_LETTERS
             }
-            Layout.LATIN -> {
-                r.addView(buildRow(EN1, letters = true))
-                r.addView(buildRow(EN2, letters = true))
-                r.addView(buildLatRow3())
+        }
+        for ((rowIdx, rowKeys) in def.rows.withIndex()) {
+            if (rowIdx == def.rows.size - 1 && def == KeyboardLayoutManager.RU_LETTERS ||
+                rowIdx == def.rows.size - 1 && def == KeyboardLayoutManager.EN_LETTERS) {
+                r.addView(buildLastLetterRow(rowKeys))
+            } else {
+                r.addView(buildLetterRow(rowKeys))
             }
         }
     }
 
-    private fun buildRow(keys: List<String>, letters: Boolean): LinearLayout {
+    private fun buildLetterRow(keys: List<KeyboardLayoutManager.KeyDef>): LinearLayout {
         val row = newRow()
         for (k in keys) {
-            val tv = makeKey(display(k), 1f, func = false)
-            tv.tag = k
-            if (letters) letterKeys.add(tv)
-            tv.setOnClickListener { onLetter(k) }
-            attachLongPress(tv, k)
+            val tv = makeKey(k.label, 1f, func = false)
+            tv.tag = k.label
+            letterKeys.add(tv)
+            tv.setOnClickListener { onLetter(k.label) }
+            if (k.longPress.isNotEmpty()) attachLongPress(tv, k.longPress)
             row.addView(tv)
         }
         return row
     }
 
-    private fun buildGrid(r: LinearLayout, rows: List<List<String>>) {
+    private fun buildLastLetterRow(keys: List<KeyboardLayoutManager.KeyDef>): LinearLayout {
+        val row = newRow()
+        row.addView(makeShift())
+        for (k in keys) {
+            val tv = makeKey(k.label, 1f, func = false)
+            tv.tag = k.label
+            letterKeys.add(tv)
+            tv.setOnClickListener { onLetter(k.label) }
+            if (k.longPress.isNotEmpty()) attachLongPress(tv, k.longPress)
+            row.addView(tv)
+        }
+        row.addView(makeBackspace())
+        return row
+    }
+
+    private fun buildGrid(r: LinearLayout, rows: List<List<KeyboardLayoutManager.KeyDef>>) {
         for (rowKeys in rows) {
             val row = newRow()
             for (k in rowKeys) {
-                val tv = makeKey(k, 1f, func = false)
-                tv.tag = k
-                tv.setOnClickListener { onSimpleSymbol(k) }
-                attachLongPress(tv, k)
+                val tv = makeKey(k.label, 1f, func = false)
+                tv.tag = k.label
+                tv.setOnClickListener { onSimpleSymbol(k.label) }
+                if (k.longPress.isNotEmpty()) attachLongPress(tv, k.longPress)
                 row.addView(tv)
             }
             r.addView(row)
         }
     }
 
-    private fun buildCyrRow3(): LinearLayout {
-        val row = newRow()
-        row.addView(makeShift())
-        for (k in RU3) {
-            val tv = makeKey(display(k), 1f, func = false)
-            tv.tag = k
-            letterKeys.add(tv)
-            tv.setOnClickListener { onLetter(k) }
-            attachLongPress(tv, k)
-            row.addView(tv)
-        }
-        row.addView(makeBackspace())
-        return row
-    }
-
-    private fun buildLatRow3(): LinearLayout {
-        val row = newRow()
-        row.addView(makeShift())
-        for (k in EN3) {
-            val tv = makeKey(display(k), 1f, func = false)
-            tv.tag = k
-            letterKeys.add(tv)
-            tv.setOnClickListener { onLetter(k) }
-            attachLongPress(tv, k)
-            row.addView(tv)
-        }
-        row.addView(makeBackspace())
-        return row
-    }
-
     private fun makeShift(): TextView {
-        val shift = makeKey("⇧", 1.3f, func = true)
-        shift.setTypeface(null, Typeface.BOLD)
-        if (shiftActive || shiftLocked) shift.setTextColor(pal.accent)
+        val shift = makeIconKey(R.drawable.ic_shift, 1.3f)
+        if (shiftActive || shiftLocked) setIconTint(shift, pal.accent)
         shift.setOnClickListener {
             haptic()
             if (shiftLocked) {
@@ -372,18 +310,16 @@ class TranslitKeyboardService : InputMethodService() {
     }
 
     private fun makeBackspace(): TextView {
-        val back = makeKey("⌫", 1.3f, func = true)
+        val back = makeIconKey(R.drawable.ic_backspace, 1.3f)
         back.setOnClickListener {
             haptic()
-            onBackspace()
+            val ic = currentInputConnection ?: return@setOnClickListener
+            input.onBackspace(ic)
+            refreshSuggestions()
         }
         back.setOnLongClickListener {
             val ic = currentInputConnection ?: return@setOnLongClickListener true
-            for (i in 0 until 20) ic.deleteSurroundingText(1, 0)
-            lastCommitLen = 0
-            composing.setLength(0)
-            composingCommitLen = 0
-            lastWord = null
+            input.onLongBackspace(ic)
             refreshSuggestions()
             true
         }
@@ -395,48 +331,56 @@ class TranslitKeyboardService : InputMethodService() {
 
         val sym = makeKey(
             when (page) {
-                Page.LETTERS -> "?123"
-                Page.SYMBOLS1 -> "=\\<"
-                Page.SYMBOLS2 -> "АБВ"
-                Page.EMOJI -> "АБВ"
+                KeyboardLayoutManager.Page.LETTERS -> "?123"
+                KeyboardLayoutManager.Page.SYMBOLS1 -> "=\\<"
+                KeyboardLayoutManager.Page.SYMBOLS2 -> "АБВ"
+                KeyboardLayoutManager.Page.EMOJI -> "АБВ"
             }, 1.4f, func = true
         )
-        sym.text = sym.text.toString()
         sym.setOnClickListener {
             haptic()
             page = when (page) {
-                Page.LETTERS -> Page.SYMBOLS1
-                Page.SYMBOLS1 -> Page.SYMBOLS2
-                Page.SYMBOLS2 -> Page.LETTERS
-                Page.EMOJI -> Page.LETTERS
+                KeyboardLayoutManager.Page.LETTERS -> KeyboardLayoutManager.Page.SYMBOLS1
+                KeyboardLayoutManager.Page.SYMBOLS1 -> KeyboardLayoutManager.Page.SYMBOLS2
+                KeyboardLayoutManager.Page.SYMBOLS2 -> KeyboardLayoutManager.Page.LETTERS
+                KeyboardLayoutManager.Page.EMOJI -> KeyboardLayoutManager.Page.LETTERS
             }
             rebuild()
         }
         row.addView(sym)
 
-        val emoji = makeKey("☺", 1f, func = true)
+        val emoji = makeIconKey(R.drawable.ic_smile, 1f)
         emoji.setOnClickListener {
             haptic()
-            page = if (page == Page.EMOJI) Page.LETTERS else Page.EMOJI
+            page = if (page == KeyboardLayoutManager.Page.EMOJI)
+                KeyboardLayoutManager.Page.LETTERS else KeyboardLayoutManager.Page.EMOJI
             rebuild()
         }
         row.addView(emoji)
 
-        val globe = makeKey("🌍", 1f, func = true)
+        val globe = makeIconKey(R.drawable.ic_globe, 1f)
         globe.setOnClickListener {
             haptic()
+            val customs = KeyboardLayoutManager.customLayouts(this)
             layout = when (layout) {
                 Layout.TRANSLIT -> Layout.CYRILLIC
-                Layout.CYRILLIC -> Layout.LATIN
+                Layout.CYRILLIC -> if (customs.isNotEmpty()) {
+                    customLayoutIndex = 0
+                    Layout.CUSTOM
+                } else Layout.LATIN
+                Layout.CUSTOM -> if (customLayoutIndex < customs.size - 1) {
+                    customLayoutIndex++
+                    Layout.CUSTOM
+                } else Layout.LATIN
                 Layout.LATIN -> Layout.TRANSLIT
             }
-            finishWord()
+            input.finishWord(false, "")
+            input.lastWords.clear()
             rebuild()
         }
-        globeKey = globe
         row.addView(globe)
 
-        val settings = makeKey("⚙", 1f, func = true)
+        val settings = makeIconKey(R.drawable.ic_settings, 1f)
         settings.setOnClickListener {
             haptic()
             startActivity(
@@ -451,7 +395,7 @@ class TranslitKeyboardService : InputMethodService() {
         val space = makeKey(spaceLabel(), 3.2f, func = true)
         space.setOnClickListener {
             haptic()
-            finishWord()
+            finishCurrentWord()
             currentInputConnection?.commitText(" ", 1)
             if (shiftActive && !shiftLocked) {
                 shiftActive = false
@@ -461,10 +405,10 @@ class TranslitKeyboardService : InputMethodService() {
         }
         row.addView(space)
 
-        val enter = makeKey("↵", 1.3f, func = true)
+        val enter = makeIconKey(R.drawable.ic_enter, 1.3f)
         enter.setOnClickListener {
             haptic()
-            finishWord()
+            finishCurrentWord()
             val ic = currentInputConnection ?: return@setOnClickListener
             val action = currentInputEditorInfo.imeOptions and EditorInfo.IME_MASK_ACTION
             if (action != EditorInfo.IME_ACTION_NONE &&
@@ -485,6 +429,21 @@ class TranslitKeyboardService : InputMethodService() {
             "транслит ICAO" else "транслит"
         Layout.CYRILLIC -> "русский"
         Layout.LATIN -> "english"
+        Layout.CUSTOM -> {
+            val customs = KeyboardLayoutManager.customLayouts(this)
+            customs.getOrNull(customLayoutIndex)?.name ?: "custom"
+        }
+    }
+
+    private fun finishCurrentWord() {
+        val ic = currentInputConnection ?: return
+        val kind = when (layout) {
+            Layout.CYRILLIC -> "ru"
+            Layout.LATIN -> "en"
+            else -> ""
+        }
+        val fix = input.finishWord(st.autocorrect && layout != Layout.TRANSLIT, kind)
+        if (fix != null) input.applyCorrection(ic, fix)
     }
 
     // ---------------------------------------------------------- панель перевода
@@ -514,7 +473,7 @@ class TranslitKeyboardService : InputMethodService() {
         panel.addView(title)
 
         val preview = TextView(this).apply {
-            text = "Наберите текст, выберите язык и нажмите «Перевести»"
+            text = "Наберите текст, выберите язык и нажмите на него"
             setTextColor(pal.dimText)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * st.fontSize)
             maxLines = 3
@@ -529,24 +488,23 @@ class TranslitKeyboardService : InputMethodService() {
 
         val scroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(90f).toInt()
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(110f).toInt()
             )
         }
         val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (chunk in Translator.LANGS.chunked(4)) {
+        for (chunk in TranslationManager.LANGS.chunked(4)) {
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             for ((code, name) in chunk) {
                 val b = Button(this).apply {
                     text = name
                     isAllCaps = false
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f * st.fontSize)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f * st.fontSize)
                     setTextColor(pal.text)
-                    val bg = GradientDrawable().apply {
+                    background = GradientDrawable().apply {
                         cornerRadius = dp(8f)
-                        setColor(pal.key)
+                        setColor(pal.keyTop)
                     }
-                    background = bg
-                    val m = dp(3f).toInt()
+                    val m = dp(2f).toInt()
                     layoutParams = LinearLayout.LayoutParams(
                         0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
                     ).apply { setMargins(m, m, m, m) }
@@ -563,11 +521,10 @@ class TranslitKeyboardService : InputMethodService() {
             text = "✕ Закрыть"
             isAllCaps = false
             setTextColor(pal.text)
-            val bg = GradientDrawable().apply {
+            background = GradientDrawable().apply {
                 cornerRadius = dp(8f)
-                setColor(pal.func)
+                setColor(pal.funcTop)
             }
-            background = bg
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins(dp(6f).toInt(), dp(6f).toInt(), dp(6f).toInt(), dp(2f).toInt()) }
@@ -584,18 +541,23 @@ class TranslitKeyboardService : InputMethodService() {
     private fun doTranslate(target: String, targetName: String) {
         val pv = translatePreview ?: return
         val ic = currentInputConnection ?: return
-        // Берём текст до курсора (максимум 200 символов)
         val before = ic.getTextBeforeCursor(200, 0)?.toString() ?: ""
         if (before.isBlank()) {
             pv.text = "Сначала наберите текст"
+            return
+        }
+        // Кэш: мгновенный результат без сети
+        TranslationManager.getCached(this, before.trim(), target)?.let { cached ->
+            pv.text = cached
+            pv.setTextColor(pal.accent)
+            showInsertButton(cached, before.length)
             return
         }
         pv.text = "Перевожу на $targetName…"
         translateThread?.interrupt()
         translateThread = thread(start = true) {
             val result = try {
-                val out = Translator.translate(before.trim(), target)
-                if (out.isEmpty()) "Ошибка: пустой ответ" else out
+                TranslationManager.translate(this, before.trim(), target)
             } catch (e: Exception) {
                 "Ошибка сети: ${e.message}"
             }
@@ -612,10 +574,8 @@ class TranslitKeyboardService : InputMethodService() {
         }
     }
 
-    /** Кнопка вставки результата: заменяет исходный текст переводом. */
     private fun showInsertButton(result: String, sourceLen: Int) {
         val panel = translatePanel ?: return
-        // удаляем старую кнопку вставки, если была (tag = "insert")
         for (i in panel.childCount - 1 downTo 0) {
             if (panel.getChildAt(i).tag == "insert") panel.removeViewAt(i)
         }
@@ -624,11 +584,10 @@ class TranslitKeyboardService : InputMethodService() {
             text = "⤵ Вставить перевод"
             isAllCaps = false
             setTextColor(Color.WHITE)
-            val bg = GradientDrawable().apply {
+            background = GradientDrawable().apply {
                 cornerRadius = dp(8f)
                 setColor(pal.accent)
             }
-            background = bg
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
@@ -646,7 +605,6 @@ class TranslitKeyboardService : InputMethodService() {
                 rebuild()
             }
         }
-        // вставляем перед кнопкой "Закрыть" (последний ребёнок)
         panel.addView(btn, panel.childCount - 1)
     }
 
@@ -668,19 +626,11 @@ class TranslitKeyboardService : InputMethodService() {
         }
         if (out.isNotEmpty()) {
             ic.commitText(out, 1)
-            lastCommitLen = out.length
-            if (k[0].isLetter()) {
-                // для подсказок собираем слово на исходном языке
-                composing.append(if (layout == Layout.TRANSLIT) k[0] else out.lowercase())
-                composingCommitLen += out.length
-            }
-        } else if (layout == Layout.TRANSLIT && k[0].isLetter()) {
-            // ъ/ь в транслите не дают символов, но входят в слово
-            composing.append(k[0])
+            input.onCharCommitted(ic, out, k[0], isLetter = true)
+        } else {
+            input.onCharCommitted(ic, "", k[0], isLetter = true)
         }
-        if (shiftActive && !shiftLocked) {
-            shiftActive = false
-        }
+        if (shiftActive && !shiftLocked) shiftActive = false
         refreshLetters()
         refreshSuggestions()
     }
@@ -689,20 +639,11 @@ class TranslitKeyboardService : InputMethodService() {
         haptic()
         val ic = currentInputConnection ?: return
         ic.commitText(k, 1)
-        finishWord()
+        input.onSymbolCommitted(ic, k)
         refreshSuggestions()
     }
 
-    /** Слово завершено: запоминаем его для ассоциативных подсказок. */
-    private fun finishWord() {
-        if (composing.isNotEmpty()) lastWord = composing.toString().lowercase()
-        composing.setLength(0)
-        composingCommitLen = 0
-        lastCommitLen = 0
-    }
-
-    private fun attachLongPress(tv: TextView, base: String) {
-        val variants = LONG_PRESS[base] ?: return
+    private fun attachLongPress(tv: TextView, variants: List<String>) {
         tv.setOnLongClickListener {
             showVariants(tv, variants)
             true
@@ -714,12 +655,11 @@ class TranslitKeyboardService : InputMethodService() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            val bg = GradientDrawable().apply {
+            background = GradientDrawable().apply {
                 cornerRadius = dp(10f)
-                setColor(pal.key)
+                setColor(pal.keyTop)
                 setStroke(dp(1f).toInt(), pal.accent)
             }
-            background = bg
         }
         val popup = android.widget.PopupWindow(
             row,
@@ -738,7 +678,7 @@ class TranslitKeyboardService : InputMethodService() {
                 )
                 setOnClickListener {
                     ic.commitText(v, 1)
-                    lastCommitLen = v.length
+                    input.lastCommitLen = v.length
                     popup.dismiss()
                 }
             }
@@ -755,18 +695,6 @@ class TranslitKeyboardService : InputMethodService() {
         )
     }
 
-    private fun onBackspace() {
-        val ic = currentInputConnection ?: return
-        val del = if (lastCommitLen > 1) lastCommitLen else 1
-        ic.deleteSurroundingText(del, 0)
-        if (composingCommitLen > 0) {
-            composingCommitLen = (composingCommitLen - del).coerceAtLeast(0)
-            if (composing.isNotEmpty()) composing.deleteCharAt(composing.length - 1)
-        }
-        lastCommitLen = 0
-        refreshSuggestions()
-    }
-
     private fun refreshLetters() {
         val upper = shiftActive || shiftLocked
         for (tv in letterKeys) {
@@ -775,10 +703,9 @@ class TranslitKeyboardService : InputMethodService() {
                 base.uppercase() else base
         }
         shiftKey?.apply {
-            setTextColor(if (upper) pal.accent else pal.text)
-            text = if (shiftLocked) "⇪" else "⇧"
+            setIcon(this, if (shiftLocked) R.drawable.ic_capslock else R.drawable.ic_shift)
+            setIconTint(this, if (upper) pal.accent else pal.text)
         }
-        globeKey?.text = "🌍"
     }
 
     private fun haptic() {
@@ -828,25 +755,23 @@ class TranslitKeyboardService : InputMethodService() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (func) 15f else 19f) * st.fontSize)
             isClickable = true
             isFocusable = true
-            val bg = GradientDrawable().apply {
-                cornerRadius = dp(8f)
-                setColor(if (func) pal.func else pal.key)
-            }
-            background = bg
+            background = keyBackground(func)
             val vPad = (dp(11f) * st.keyHeight).toInt()
             setPadding(0, vPad, 0, vPad)
             setOnTouchListener(object : View.OnTouchListener {
                 override fun onTouch(v: View, event: MotionEvent): Boolean {
                     when (event.action) {
-                        MotionEvent.ACTION_DOWN ->
-                            (v.background as GradientDrawable).setColor(
-                                if (func) pal.pressedFunc else pal.pressedKey
-                            )
+                        MotionEvent.ACTION_DOWN -> {
+                            v.background = pressedBackground(func)
+                            v.animate().scaleX(0.94f).scaleY(0.94f).setDuration(60).start()
+                            showBubble(v)
+                        }
                         MotionEvent.ACTION_UP,
-                        MotionEvent.ACTION_CANCEL ->
-                            (v.background as GradientDrawable).setColor(
-                                if (func) pal.func else pal.key
-                            )
+                        MotionEvent.ACTION_CANCEL -> {
+                            v.background = keyBackground(func)
+                            v.animate().scaleX(1f).scaleY(1f).setDuration(90).start()
+                            hideBubble()
+                        }
                     }
                     return false
                 }
@@ -859,13 +784,93 @@ class TranslitKeyboardService : InputMethodService() {
         return tv
     }
 
+    private fun keyBackground(func: Boolean): GradientDrawable = GradientDrawable(
+        GradientDrawable.Orientation.TOP_BOTTOM,
+        if (func) intArrayOf(pal.funcTop, pal.funcBottom)
+        else intArrayOf(pal.keyTop, pal.keyBottom)
+    ).apply {
+        cornerRadius = dp(10f)
+        setStroke(dp(1f).toInt(), if (func) pal.funcStroke else pal.keyStroke)
+    }
+
+    private fun pressedBackground(func: Boolean): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(10f)
+        setColor(if (func) pal.pressedFunc else pal.pressedKey)
+        setStroke(dp(1f).toInt(), if (func) pal.funcStroke else pal.keyStroke)
+    }
+
+    private fun makeIconKey(@DrawableRes icon: Int, weight: Float, func: Boolean = true): TextView {
+        val tv = makeKey("", weight, func)
+        setIcon(tv, icon)
+        return tv
+    }
+
+    private fun setIcon(tv: TextView, @DrawableRes icon: Int) {
+        val d = ContextCompat.getDrawable(this, icon)!!
+        d.setTint(pal.text)
+        val size = dp(22f).toInt()
+        d.setBounds(0, 0, size, size)
+        tv.setCompoundDrawables(d, null, null, null)
+        tv.compoundDrawablePadding = 0
+    }
+
+    private fun setIconTint(tv: TextView, color: Int) {
+        tv.compoundDrawables.firstOrNull()?.setTint(color)
+    }
+
+    private var bubble: TextView? = null
+
+    private fun showBubble(key: View) {
+        hideBubble()
+        val label = key.tag as? String ?: return
+        val show = when {
+            label.isEmpty() -> null
+            layout == Layout.TRANSLIT && label.length == 1 && label[0].isLetter() ->
+                st.translitMode.translit(label[0], shiftActive || shiftLocked)
+                    .ifEmpty { null }
+            label.length <= 2 -> label
+            else -> null
+        } ?: return
+        val tv = TextView(this).apply {
+            text = show
+            gravity = Gravity.CENTER
+            setTextColor(pal.text)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f * st.fontSize)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10f)
+                setColor(pal.bubbleBg)
+            }
+            val w = dp(46f).toInt()
+            val h = dp(42f).toInt()
+            layoutParams = android.view.ViewGroup.LayoutParams(w, h)
+        }
+        bubble = tv
+        val frame = overlay ?: return
+        frame.addView(tv)
+        val loc = IntArray(2)
+        key.getLocationInWindow(loc)
+        val parentLoc = IntArray(2)
+        frame.getLocationInWindow(parentLoc)
+        val x = loc[0] + key.width / 2 - tv.layoutParams.width / 2
+        val y = loc[1] - parentLoc[1] - tv.layoutParams.height - dp(4f).toInt()
+        tv.x = x.toFloat()
+        tv.y = y.toFloat()
+        tv.alpha = 0f
+        tv.animate().alpha(1f).setDuration(80).start()
+    }
+
+    private fun hideBubble() {
+        bubble?.let { b ->
+            (b.parent as? android.view.ViewGroup)?.removeView(b)
+        }
+        bubble = null
+    }
+
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
-        lastCommitLen = 0
-        composing.setLength(0)
-        composingCommitLen = 0
-        lastWord = null
+        input.reset()
     }
 }
