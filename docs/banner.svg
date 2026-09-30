@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1B1B26"/>
+      <stop offset="0.55" stop-color="#2A2A44"/>
+      <stop offset="1" stop-color="#3B2A5E"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4A7DFF"/>
+      <stop offset="1" stop-color="#9C6BFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="360" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1200" height="6" fill="url(#accent)"/>
+
+  <!-- Иконка -->
+  <rect x="70" y="106" width="148" height="148" rx="34" fill="url(#accent)"/>
+  <rect x="92" y="136" width="104" height="88" rx="18" fill="#FFFFFF"/>
+  <text x="144" y="196" text-anchor="middle" font-family="DejaVu Sans" font-weight="bold" font-size="40">
+    <tspan fill="#2A2A32">П</tspan><tspan fill="#4A7DFF" font-size="30">→</tspan><tspan fill="#2A2A32">P</tspan>
+  </text>
+
+  <!-- Заголовок -->
+  <text x="270" y="150" font-family="DejaVu Sans" font-weight="bold" font-size="58" fill="#FFFFFF">Translit Keyboard</text>
+  <text x="270" y="198" font-family="DejaVu Sans" font-size="27" fill="#C9CDE0">Android-клавиатура: «привет» → privet</text>
+  <text x="270" y="234" font-family="DejaVu Sans" font-size="20" fill="#8B90B0">3 раскладки · переводчик · умные подсказки · кастомизация</text>
+
+  <!-- Демо-строка -->
+  <g font-family="DejaVu Sans">
+    <rect x="70" y="284" width="1060" height="46" rx="12" fill="#00000040"/>
+    <text x="92" y="314" font-size="22" fill="#9AA0C0">привет</text>
+    <text x="188" y="314" font-size="22" fill="#4A7DFF">→</text>
+    <text x="222" y="314" font-size="22" fill="#FFFFFF">privet</text>
+    <text x="330" y="314" font-size="22" fill="#5A5F78">|</text>
+    <text x="360" y="314" font-size="22" fill="#9AA0C0">щука</text>
+    <text x="432" y="314" font-size="22" fill="#4A7DFF">→</text>
+    <text x="466" y="314" font-size="22" fill="#FFFFFF">schuka</text>
+    <text x="590" y="314" font-size="22" fill="#5A5F78">|</text>
+    <text x="620" y="314" font-size="22" fill="#9AA0C0">привет</text>
+    <text x="716" y="314" font-size="22" fill="#9C6BFF">→</text>
+    <text x="752" y="314" font-size="22" fill="#D8CFFF">как дела · что нового</text>
+  </g>
+</svg>
